@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Receipt Scanner</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    <style>
+        /* Your CSS for scanner.html (copy from previous response) */
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: system-ui, Arial, sans-serif; display: flex; flex-direction: column; min-height: 100vh; background: #fff; padding-bottom: 66px; }
+        h3 { margin: 1.2rem 0 .6rem 5%; text-align: left; }
+        .top-bar { position: sticky; top: 0; z-index: 10; background: #47c9c2; color: #fff; font-weight: 600; font-size: 1.25rem; text-align: center; padding: .9rem 0; }
+        .top-bar .back { position: absolute; left: 1rem; top: 50%; transform: translateY(-50%); font-size: 1.6rem; cursor: pointer; }
+        main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+        .scanner-frame { width: 280px; height: 280px; position: relative; overflow: hidden; margin-top: 1.2rem; box-shadow: 0 4px 10px rgba(0,0,0,0.1); border-radius: 8px; }
+        .scanner-frame::before, .scanner-frame::after { content: ''; position: absolute; width: 44px; height: 44px; border: 5px solid #47c9c2; pointer-events: none; }
+        .scanner-frame::before { left: 0; top: 0; border-right: none; border-bottom: none; }
+        .scanner-frame::after { right: 0; bottom: 0; border-left: none; border-top: none; }
+        video, img { width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
+        img { display: none; }
+        .capture-btn, .action-btn { background: #47c9c2; color: #fff; border: none; border-radius: 999px; padding: .8rem 2rem; font-size: 1rem; font-weight: 600; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,.15); transition: background-color 0.2s ease, box-shadow 0.2s ease; }
+        .capture-btn:hover, .action-btn:hover { background-color: #3aa7a2; box-shadow: 0 6px 12px rgba(0,0,0,0.2); }
+        .capture-btn { margin: 1.8rem 0; }
+        .action-row { display: none; gap: 1.2rem; margin: 1.8rem 0; }
+        .action-btn { border-radius: 10px; }
+        #loader { display: none; margin-top: .8rem; font-weight: bold; color: #47c9c2; }
+        /* Add other styles for scanner view */
+        .bottom-nav { position: fixed; left: 0; bottom: 0; width: 100%; height: 60px; border-top: 1px solid #ddd; display: flex; justify-content: space-around; align-items: center; background: #fff; box-shadow: 0 -2px 8px rgba(0,0,0,0.1); }
+        .bottom-nav .icon { font-size: 1.55rem; color: #47c9c2; cursor: pointer; text-decoration: none; display: flex; align-items: center; justify-content: center; padding: 5px; transition: color 0.2s ease; }
+        .bottom-nav .icon:hover { color: #3aa7a2; }
+    </style>
+</head>
+<body>
+    <div class="top-bar">
+        <span class="back" onclick="history.back()">&#8592;</span>Scanner
+    </div>
+    <main>
+        <div id="scannerView">
+            <div class="scanner-frame">
+                <video id="video" autoplay playsinline></video>
+            </div>
+            <button id="capture" class="capture-btn">Scan Receipt</button>
+        </div>
+
+        <div id="previewView" style="display:none">
+            <div class="scanner-frame">
+                <img id="snapshot" alt="Snapshot">
+            </div>
+            <div class="action-row" id="actions">
+                <button class="action-btn" onclick="retake()">Retake</button>
+                <button class="action-btn" onclick="proceed()">Proceed</button>
+            </div>
+            <div id="loader">🔍 Processing…</div>
+        </div>
+    </main>
+
+    <nav class="bottom-nav">
+        <a href="home.html" class="icon">🏠</a>
+        <a href="analysis.html" class="icon">📊</a>
+        <a href="scanner.html" class="icon">📷</a>
+        <a href="scan-list.html" class="icon">🛒</a>
+        <a href="profile.html" class="icon">👤</a>
+    </nav>
+
+    <canvas id="canvas" style="display:none"></canvas>
+
+    <script type="module">
+        import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+
+        const supabase = createClient(
+            "https://cwfqevyvpfbjibdiaooh.supabase.co",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN3ZnFldnl2cGZiamliZGlhb29oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDYzNjM2NzAsImV4cCI6MjA2MTkzOTY3MH0.UzlB1bRUJhpSwUfkw7DQ5ihZh3tzdc-wzFOw7IAvqHA"
+        );
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const capture = document.getElementById('capture');
+        const snapshotImg = document.getElementById('snapshot');
+        const actions = document.getElementById('actions');
+        const loader = document.getElementById('loader');
+
+        let dataUrl = '';
+        let items = [];
+        let grandTotal = 0;
+        let scanId = '';
+
+        // --- Camera Control ---
+        let cameraStream;
+        function startCamera() {
+            if (cameraStream) {
+                stopCamera(); // Ensure previous stream is stopped
+            }
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+                .then(stream => {
+                    video.srcObject = stream;
+                    cameraStream = stream;
+                })
+                .catch(err => alert('Camera error: ' + err.message + '. Please ensure camera access is granted.'));
+        }
+
+        function stopCamera() {
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+                cameraStream = null;
+            }
+        }
+
+        // --- Image Preprocessing Function ---
+        function preprocessImage(imageDataUrl) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                    const tempCanvas = document.createElement('canvas');
+                    const tempCtx = tempCanvas.getContext('2d');
+                    tempCanvas.width = img.width;
+                    tempCanvas.height = img.height;
+                    tempCtx.drawImage(img, 0, 0);
+
+                    // Example: Simple binarization (improves contrast for text)
+                    const imgData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+                    const pixels = imgData.data;
+                    for (let i = 0; i < pixels.length; i += 4) {
+                        const lightness = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+                        const color = lightness > 128 ? 255 : 0; // Black or white
+                        pixels[i] = color;     // Red
+                        pixels[i + 1] = color; // Green
+                        pixels[i + 2] = color; // Blue
+                    }
+                    tempCtx.putImageData(imgData, 0, 0);
+                    resolve(tempCanvas.toDataURL('image/png'));
+                };
+                img.src = imageDataUrl;
+            });
+        }
+
+        // --- Event Handlers ---
+        capture.addEventListener('click', async () => {
+            const rawW = video.videoWidth;
+            const rawH = video.videoHeight;
+            const size = Math.min(rawW, rawH);
+            const cropX = (rawW - size) / 2;
+            const cropY = (rawH - size) / 2;
+
+            canvas.width = size;
+            canvas.height = size;
+            ctx.drawImage(video, cropX, cropY, size, size, 0, 0, size, size);
+            
+            dataUrl = await preprocessImage(canvas.toDataURL('image/png'));
+            snapshotImg.src = dataUrl;
+
+            document.getElementById('scannerView').style.display = 'none';
+            document.getElementById('previewView').style.display = 'block';
+            snapshotImg.style.display = 'block';
+            actions.style.display = 'flex';
+            stopCamera(); // Stop camera when in preview
+
+            // Create a new scan record in receipt_scans
+            const { data: scanData, error: scanError } = await supabase
+                .from('receipt_scans')
+                .insert({}) 
+                .select('scan_id')
+                .single();
+
+            if (scanError) {
+                console.error('Error creating scan record:', scanError.message);
+                alert('Error creating scan record: ' + scanError.message);
+                retake();
+                return;
+            }
+
+            if (scanData && scanData.scan_id) {
+                scanId = scanData.scan_id;
+            } else {
+                console.error('Failed to retrieve scan_id.');
+                alert('Failed to get scan ID. Please try again.');
+                retake();
+                return;
+            }
+        });
+
+        window.retake = () => {
+            document.getElementById('previewView').style.display = 'none';
+            document.getElementById('scannerView').style.display = 'block';
+            loader.style.display = 'none';
+            items = [];
+            grandTotal = 0;
+            scanId = ''; 
+            startCamera(); // Restart camera on retake
+        };
+
+        window.proceed = async () => {
+            actions.style.display = 'none';
+            loader.style.display = 'block';
+
+            try {
+                const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng');
+                
+                const parsedResult = parseReceiptText(text);
+                items = parsedResult.items;
+                grandTotal = parsedResult.grandTotal;
+
+                if (items.length > 0 && scanId) {
+                    const itemsToInsert = items.map(item => ({
+                        scan_id: scanId,
+                        name: item.name,
+                        unit_price: item.unit_price || item.amount,
+                        quantity: item.quantity || 1,
+                        total_expense: item.amount
+                    }));
+
+                    const { error } = await supabase
+                        .from('receipt_list')
+                        .insert(itemsToInsert);
+
+                    if (error) {
+                        console.error('Error inserting receipt items:', error.message);
+                        alert('Error saving receipt items: ' + error.message);
+                    } else {
+                        console.log('Receipt items saved successfully!');
+                        // Optional: save grand total to receipt_scans table
+                        await supabase.from('receipt_scans').update({ total_amount: grandTotal }).eq('scan_id', scanId);
+                    }
+                } else if (!scanId) {
+                    console.error('scan_id is not available. Cannot insert items.');
+                    alert('Scan ID missing. Cannot save receipt.');
+                }
+            } catch (ocrError) {
+                console.error('OCR or processing error:', ocrError);
+                alert('Failed to process receipt: ' + ocrError.message);
+            } finally {
+                loader.style.display = 'none';
+                // Redirect to scan-list.html after processing
+                window.location.href = 'scan_list.html'; 
+            }
+        };
+
+        // --- Enhanced Receipt Text Parsing ---
+        function parseReceiptText(rawText) {
+            const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+            const parsedItems = [];
+            let extractedGrandTotal = 0;
+
+            const itemRegex = /(.+?)(?:\s+(\d+)\s*[xX@]\s*([\d,\.]+))?\s+([\d,\.]+)$/;
+            const totalRegex = /(?:TOTAL|GRAND\s*TOTAL|AMOUNT|SUBTOTAL|TOTAL\s*DUE|BALANCE)\s*[:\s]*([\d,\.]+)$/i; // Added BALANCE and optional colon
+
+            for (const line of lines) {
+                const totalMatch = line.match(totalRegex);
+                if (totalMatch) {
+                    const totalValue = parseFloat(totalMatch[1].replace(/,/g, ''));
+                    if (!isNaN(totalValue)) {
+                        extractedGrandTotal = totalValue;
+                        continue; 
+                    }
+                }
+
+                const itemMatch = line.match(itemRegex);
+                if (itemMatch) {
+                    const name = itemMatch[1].trim();
+                    const quantity = itemMatch[2] ? parseInt(itemMatch[2]) : 1;
+                    const unitPrice = itemMatch[3] ? parseFloat(itemMatch[3].replace(/,/g, '')) : null;
+                    const amount = parseFloat(itemMatch[4].replace(/,/g, ''));
+
+                    if (!isNaN(amount)) {
+                        parsedItems.push({
+                            name: name,
+                            quantity: quantity,
+                            unit_price: unitPrice,
+                            amount: amount 
+                        });
+                    }
+                }
+            }
+            
+            if (extractedGrandTotal === 0 && parsedItems.length > 0) {
+                extractedGrandTotal = parsedItems.reduce((sum, item) => sum + item.amount, 0);
+            }
+
+            return {
+                items: parsedItems,
+                grandTotal: extractedGrandTotal
+            };
+        }
+
+        // --- Initial Camera Start ---
+        document.addEventListener('DOMContentLoaded', startCamera);
+        
+        // Navigation links (for separate HTML files)
+        // No need for event listeners on nav icons if they are simple <a> tags
+        // with href to other HTML files, as you have them.
+    </script>
+</body>
+</html>
